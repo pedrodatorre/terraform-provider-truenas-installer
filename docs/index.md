@@ -19,7 +19,7 @@ terraform {
     # The resource types are prefixed `truenas_`, so the local name MUST be
     # `truenas`. The source selects this provider.
     truenas = {
-      source = "pedrodatorre/truenas-installer"
+      source = "registry.terraform.io/pedrodatorre/truenas-installer"
     }
   }
 }
@@ -29,6 +29,10 @@ provider "truenas" {
   timeout  = "45m"
 }
 ```
+
+> **OpenTofu:** use the explicit host
+> `registry.terraform.io/pedrodatorre/truenas-installer`; a bare source is
+> resolved against `registry.opentofu.org`, where this provider is not published.
 
 ## Schema
 

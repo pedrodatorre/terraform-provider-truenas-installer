@@ -33,7 +33,7 @@ terraform {
     # IMPORTANT: the resource types are prefixed `truenas_`, so the local name
     # MUST be `truenas`. The source is what selects this provider.
     truenas = {
-      source = "pedrodatorre/truenas-installer"
+      source = "registry.terraform.io/pedrodatorre/truenas-installer"
     }
   }
 }
@@ -46,6 +46,13 @@ provider "truenas" {
 
 `endpoint` accepts `host`, `host:port`, `ws://host/ws`, `wss://host/ws`,
 `http://host` or `https://host`. A bare host becomes `ws://host:80/ws`.
+
+> **OpenTofu:** OpenTofu resolves a bare source like
+> `pedrodatorre/truenas-installer` against `registry.opentofu.org`. This provider
+> is published on the Terraform Registry, so use the explicit host
+> `registry.terraform.io/pedrodatorre/truenas-installer` (Terraform accepts it
+> too). Alternatively, add `registry.terraform.io` to your `provider_installation`
+> `direct` settings.
 
 ## Resources
 
