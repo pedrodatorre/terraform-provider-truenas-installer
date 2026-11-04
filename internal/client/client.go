@@ -109,6 +109,30 @@ func (c *Client) Connect(ctx context.Context) error {
 	return c.connectLocked(ctx)
 }
 
+// ConnectWithRetry retries Connect every interval until ctx is done. It is used
+// by resources that may run right after the installer VM has booted.
+func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := c.Connect(attemptCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("connect to %s: %w", c.endpoint, lastErr)
+		case <-time.After(interval):
+		}
+	}
+}
+
 func (c *Client) connectLocked(ctx context.Context) error {
 	if c.conn != nil {
 		return nil

@@ -184,7 +184,9 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.AddError("Invalid installer endpoint", err.Error())
 		return
 	}
-	if err := cl.Connect(ctx); err != nil {
+	connectCtx, cancel := context.WithTimeout(ctx, r.config.Timeout)
+	defer cancel()
+	if err := cl.ConnectWithRetry(connectCtx, 5*time.Second); err != nil {
 		resp.Diagnostics.AddError(
 			"Cannot reach the TrueNAS installer",
 			"The installer's JSON-RPC server was not reachable at "+r.config.Endpoint+". "+
@@ -202,6 +204,34 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 	if info.InstallationRunning {
 		resp.Diagnostics.AddError("An installation is already running", "The installer is busy with another client.")
 		return
+	}
+
+	// Log the disks the installer sees, and refuse an unknown target disk. With
+	// an HBA passed through, the data disks are visible too; this makes the
+	// choice explicit in the apply log.
+	if disks, err := cl.ListDisks(ctx); err == nil {
+		var names []string
+		known := make(map[string]bool, len(disks))
+		for _, disk := range disks {
+			tflog.Info(ctx, "installer disk", map[string]any{
+				"name":      disk.Name,
+				"size":      disk.Size,
+				"model":     disk.Model,
+				"label":     disk.Label,
+				"removable": disk.Removable,
+			})
+			names = append(names, disk.Name)
+			known[disk.Name] = true
+		}
+		for _, name := range request.Disks {
+			if !known[name] {
+				resp.Diagnostics.AddError(
+					"Unknown install disk",
+					"Disk "+name+" is not reported by the installer. Available disks: "+strings.Join(names, ", "),
+				)
+				return
+			}
+		}
 	}
 
 	if info.InstallationCompleted {

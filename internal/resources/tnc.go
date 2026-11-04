@@ -119,7 +119,9 @@ func (r *tncResource) Create(ctx context.Context, req resource.CreateRequest, re
 		resp.Diagnostics.AddError("Invalid installer endpoint", err.Error())
 		return
 	}
-	if err := cl.Connect(ctx); err != nil {
+	connectCtx, cancel := context.WithTimeout(ctx, r.config.Timeout)
+	defer cancel()
+	if err := cl.ConnectWithRetry(connectCtx, 5*time.Second); err != nil {
 		resp.Diagnostics.AddError(
 			"Cannot reach the TrueNAS installer",
 			"The installer's JSON-RPC server was not reachable at "+r.config.Endpoint+".\n\n"+err.Error(),
