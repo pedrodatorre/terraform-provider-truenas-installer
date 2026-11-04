@@ -1,0 +1,8 @@
+terraform-provider-truenas-installer
+terraform-provider-truenas-installer_*
+dist/
+*.test
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate*
+crash.log
