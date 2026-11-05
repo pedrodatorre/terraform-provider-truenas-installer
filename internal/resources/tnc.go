@@ -119,6 +119,7 @@ func (r *tncResource) Create(ctx context.Context, req resource.CreateRequest, re
 		resp.Diagnostics.AddError("Invalid installer endpoint", err.Error())
 		return
 	}
+	cl.BootTimeout = r.config.BootTimeout
 	connectCtx, cancel := context.WithTimeout(ctx, r.config.Timeout)
 	defer cancel()
 	if err := cl.ConnectWithRetry(connectCtx, 5*time.Second); err != nil {

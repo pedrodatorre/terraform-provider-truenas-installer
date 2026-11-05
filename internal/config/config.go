@@ -11,5 +11,6 @@ import "time"
 type Config struct {
 	Endpoint           string
 	Timeout            time.Duration
+	BootTimeout        time.Duration
 	InsecureSkipVerify bool
 }

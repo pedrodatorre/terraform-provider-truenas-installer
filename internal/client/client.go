@@ -39,9 +39,10 @@ type ProgressFunc func(progress float64, message string)
 
 // Client is a single JSON-RPC connection to the installer.
 type Client struct {
-	endpoint  string
-	timeout   time.Duration
-	tlsConfig *tls.Config
+	endpoint    string
+	timeout     time.Duration
+	BootTimeout time.Duration
+	tlsConfig   *tls.Config
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -58,7 +59,7 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
-	return &Client{endpoint: normalized, timeout: timeout}, nil
+	return &Client{endpoint: normalized, timeout: timeout, BootTimeout: defaultBootTimeout}, nil
 }
 
 // Endpoint returns the normalised WebSocket URL.
@@ -159,10 +160,9 @@ func (e *AlreadyInstalledError) Error() string {
 	return fmt.Sprintf("%s: the installer is not running but the machine answers on port 443; it appears to be running TrueNAS", e.Endpoint)
 }
 
-// bootTimeout caps how long ConnectWithRetry waits for the installer to boot.
-// The installer is normally reachable within a couple of minutes; waiting the
-// full RPC timeout (45m) only hides "the machine is already installed".
-const bootTimeout = 10 * time.Minute
+// defaultBootTimeout caps how long ConnectWithRetry waits for the installer to
+// boot. The installer is normally reachable within a couple of minutes.
+const defaultBootTimeout = 10 * time.Minute
 
 // installedProbePort is the port probed to detect an already-installed
 // TrueNAS. It is a variable so tests can point it at a local listener.
@@ -175,7 +175,12 @@ func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) e
 		interval = 5 * time.Second
 	}
 
-	deadline := time.Now().Add(bootTimeout)
+	boot := c.BootTimeout
+	if boot <= 0 {
+		boot = defaultBootTimeout
+	}
+
+	deadline := time.Now().Add(boot)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
@@ -188,21 +193,22 @@ func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) e
 		if err == nil {
 			return nil
 		}
+		lastErr = err
+
+		// Probe before returning a bad-handshake error: an installed TrueNAS
+		// answers 302 on port 80 (redirect to 443), which gorilla reports as a
+		// permanent bad handshake.
+		if c.probeInstalled() {
+			return &AlreadyInstalledError{Endpoint: c.endpoint}
+		}
 
 		var permanent *PermanentError
 		if errors.As(err, &permanent) {
 			return err
 		}
-		lastErr = err
-
-		// Port 80 refused: either the VM is still booting or it is already
-		// running the installed TrueNAS (which answers on 443).
-		if c.probeInstalled() {
-			return &AlreadyInstalledError{Endpoint: c.endpoint}
-		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("the installer did not become reachable at %s within %s: %w", c.endpoint, bootTimeout, lastErr)
+			return fmt.Errorf("the installer did not become reachable at %s within %s: %w", c.endpoint, boot, lastErr)
 		}
 
 		select {
@@ -273,6 +279,29 @@ func ProbeInstalled(ctx context.Context, host, username, password string, insecu
 		return "", fmt.Errorf("parse system.info: %w", err)
 	}
 	return info.Version, nil
+}
+
+// ProbeInstalledWithRetry retries ProbeInstalled until ctx is done. The
+// installed TrueNAS may open port 443 before its middleware and admin account
+// are ready, so the first authentication can fail transiently.
+func ProbeInstalledWithRetry(ctx context.Context, host, username, password string, insecureSkipVerify bool, interval time.Duration) (string, error) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	var lastErr error
+	for {
+		version, err := ProbeInstalled(ctx, host, username, password, insecureSkipVerify, 30*time.Second)
+		if err == nil {
+			return version, nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("the TrueNAS API did not confirm the installation: %w", lastErr)
+		case <-time.After(interval):
+		}
+	}
 }
 
 func (c *Client) connectLocked(ctx context.Context) error {

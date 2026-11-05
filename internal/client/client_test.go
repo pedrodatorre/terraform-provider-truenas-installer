@@ -138,6 +138,17 @@ func TestCallAndProgress(t *testing.T) {
 }
 
 func TestConnectWithRetryFailsFastOnBadHandshake(t *testing.T) {
+	// Make the 443 probe deterministic: point it at a closed port.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := closed.Addr().(*net.TCPAddr).Port
+	_ = closed.Close()
+	oldPort := installedProbePort
+	installedProbePort = strconv.Itoa(closedPort)
+	defer func() { installedProbePort = oldPort }()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not the installer", http.StatusServiceUnavailable)
 	}))
@@ -156,6 +167,43 @@ func TestConnectWithRetryFailsFastOnBadHandshake(t *testing.T) {
 	var permanent *PermanentError
 	if !errors.As(err, &permanent) {
 		t.Fatalf("expected PermanentError, got %T: %v", err, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("took %s, expected a fail-fast error", elapsed)
+	}
+}
+
+func TestConnectWithRetryAdoptsInstalledWithRedirect(t *testing.T) {
+	// The installed TrueNAS redirects HTTP to HTTPS on port 80.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://example.invalid/", http.StatusFound)
+	}))
+	defer server.Close()
+
+	// An open port stands in for TrueNAS on 443.
+	installed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer installed.Close()
+
+	oldPort := installedProbePort
+	installedProbePort = strconv.Itoa(installed.Addr().(*net.TCPAddr).Port)
+	defer func() { installedProbePort = oldPort }()
+
+	cl, err := New(server.URL, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	err = cl.ConnectWithRetry(context.Background(), 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var alreadyInstalled *AlreadyInstalledError
+	if !errors.As(err, &alreadyInstalled) {
+		t.Fatalf("expected AlreadyInstalledError, got %T: %v", err, err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("took %s, expected a fail-fast error", elapsed)

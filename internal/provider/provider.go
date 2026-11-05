@@ -59,6 +59,12 @@ func (p *truenasInstallerProvider) Schema(_ context.Context, _ provider.SchemaRe
 					"(`wss://<host>/api/current`). Defaults to `true` because TrueNAS uses a " +
 					"self-signed certificate by default.",
 			},
+			"boot_timeout": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "How long to wait for the installer to boot before failing, as a Go " +
+					"duration (for example `10m`). Defaults to `10m`. The same window is used to retry " +
+					"the TrueNAS API probe when the machine is already installed.",
+			},
 		},
 	}
 }
@@ -96,6 +102,16 @@ func (p *truenasInstallerProvider) Configure(ctx context.Context, req provider.C
 	if !configModel.InsecureSkipVerify.IsNull() && !configModel.InsecureSkipVerify.IsUnknown() {
 		p.config.InsecureSkipVerify = configModel.InsecureSkipVerify.ValueBool()
 	}
+
+	p.config.BootTimeout = 10 * time.Minute
+	if !configModel.BootTimeout.IsNull() && !configModel.BootTimeout.IsUnknown() && configModel.BootTimeout.ValueString() != "" {
+		bootTimeout, err := time.ParseDuration(configModel.BootTimeout.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Invalid boot_timeout", "The `boot_timeout` attribute must be a Go duration such as `10m`: "+err.Error())
+			return
+		}
+		p.config.BootTimeout = bootTimeout
+	}
 }
 
 func (p *truenasInstallerProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -113,4 +129,5 @@ type providerModel struct {
 	Endpoint           types.String `tfsdk:"endpoint"`
 	Timeout            types.String `tfsdk:"timeout"`
 	InsecureSkipVerify types.Bool   `tfsdk:"insecure_skip_verify"`
+	BootTimeout        types.String `tfsdk:"boot_timeout"`
 }

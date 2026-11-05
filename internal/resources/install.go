@@ -185,6 +185,7 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.AddError("Invalid installer endpoint", err.Error())
 		return
 	}
+	cl.BootTimeout = r.config.BootTimeout
 	connectCtx, cancel := context.WithTimeout(ctx, r.config.Timeout)
 	defer cancel()
 	if err := cl.ConnectWithRetry(connectCtx, 5*time.Second); err != nil {
@@ -276,16 +277,20 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 // answers on 443: probe the TrueNAS API with the admin credentials and, if it
 // authenticates, mark the resource complete instead of failing.
 func (r *installResource) adoptInstalled(ctx context.Context, cl *client.Client, plan *installModel, request client.InstallRequest, resp *resource.CreateResponse) {
-	probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	boot := r.config.BootTimeout
+	if boot <= 0 {
+		boot = 10 * time.Minute
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, boot)
 	defer cancel()
 
-	version, err := client.ProbeInstalled(
+	version, err := client.ProbeInstalledWithRetry(
 		probeCtx,
 		cl.Host(),
 		request.Authentication.Username,
 		request.Authentication.Password,
 		r.config.InsecureSkipVerify,
-		30*time.Second,
+		5*time.Second,
 	)
 	if err != nil {
 		resp.Diagnostics.AddError(
