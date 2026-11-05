@@ -5,8 +5,13 @@ package client
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +105,7 @@ func TestCallAndProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cl.Close()
 	ctx := context.Background()
 
 	info, err := cl.SystemInfo(ctx)
@@ -127,5 +133,72 @@ func TestCallAndProgress(t *testing.T) {
 
 	if _, err := cl.ListNetworkInterfaces(ctx); err == nil {
 		t.Error("expected the JSON-RPC error to be surfaced")
+	}
+}
+
+func TestConnectWithRetryFailsFastOnBadHandshake(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not the installer", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cl, err := New(server.URL, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	err = cl.ConnectWithRetry(context.Background(), 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var permanent *PermanentError
+	if !errors.As(err, &permanent) {
+		t.Fatalf("expected PermanentError, got %T: %v", err, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("took %s, expected a fail-fast error", elapsed)
+	}
+}
+
+func TestConnectWithRetryDetectsInstalled(t *testing.T) {
+	// An open port that stands in for the installed TrueNAS on 443.
+	installed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer installed.Close()
+
+	oldPort := installedProbePort
+	installedProbePort = strconv.Itoa(installed.Addr().(*net.TCPAddr).Port)
+	defer func() { installedProbePort = oldPort }()
+
+	// A closed port stands in for the installer endpoint.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsPort := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	cl, err := New(fmt.Sprintf("ws://127.0.0.1:%d/ws", wsPort), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	err = cl.ConnectWithRetry(context.Background(), 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var permanent *PermanentError
+	if !errors.As(err, &permanent) {
+		t.Fatalf("expected PermanentError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "running TrueNAS") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("took %s, expected a fail-fast error", elapsed)
 	}
 }

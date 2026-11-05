@@ -109,12 +109,43 @@ func (c *Client) Connect(ctx context.Context) error {
 	return c.connectLocked(ctx)
 }
 
-// ConnectWithRetry retries Connect every interval until ctx is done. It is used
-// by resources that may run right after the installer VM has booted.
+// PermanentError is a connection failure that retrying cannot fix.
+type PermanentError struct {
+	Endpoint string
+	Reason   string
+	Err      error
+}
+
+func (e *PermanentError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %s (%v)", e.Endpoint, e.Reason, e.Err)
+	}
+	return fmt.Sprintf("%s: %s", e.Endpoint, e.Reason)
+}
+
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+// bootTimeout caps how long ConnectWithRetry waits for the installer to boot.
+// The installer is normally reachable within a couple of minutes; waiting the
+// full RPC timeout (45m) only hides "the machine is already installed".
+const bootTimeout = 10 * time.Minute
+
+// installedProbePort is the port probed to detect an already-installed
+// TrueNAS. It is a variable so tests can point it at a local listener.
+var installedProbePort = "443"
+
+// ConnectWithRetry retries Connect every interval until the installer is up,
+// fails permanently, or the boot timeout expires.
 func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
+
+	deadline := time.Now().Add(bootTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+
 	var lastErr error
 	for {
 		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -123,7 +154,27 @@ func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) e
 		if err == nil {
 			return nil
 		}
+
+		var permanent *PermanentError
+		if errors.As(err, &permanent) {
+			return err
+		}
 		lastErr = err
+
+		// Port 80 refused: either the VM is still booting or it is already
+		// running the installed TrueNAS (which answers on 443).
+		if c.probeInstalled() {
+			return &PermanentError{
+				Endpoint: c.endpoint,
+				Reason: "port 443 is answering but the installer WebSocket is not; " +
+					"the machine appears to be running TrueNAS. Boot the installation ISO and wipe the boot disk before replacing this resource",
+				Err: lastErr,
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the installer did not become reachable at %s within %s: %w", c.endpoint, bootTimeout, lastErr)
+		}
 
 		select {
 		case <-ctx.Done():
@@ -133,13 +184,33 @@ func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) e
 	}
 }
 
+func (c *Client) probeInstalled() bool {
+	u, err := url.Parse(c.endpoint)
+	if err != nil || u.Scheme != "ws" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), installedProbePort), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func (c *Client) connectLocked(ctx context.Context) error {
 	if c.conn != nil {
 		return nil
 	}
 	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, c.endpoint, nil)
+	conn, resp, err := dialer.DialContext(ctx, c.endpoint, nil)
 	if err != nil {
+		if resp != nil {
+			return &PermanentError{
+				Endpoint: c.endpoint,
+				Reason:   fmt.Sprintf("the endpoint answered HTTP %d instead of a WebSocket upgrade; the installer is not running (the machine may already be installed)", resp.StatusCode),
+				Err:      err,
+			}
+		}
 		return fmt.Errorf("connect to %s: %w", c.endpoint, err)
 	}
 	c.conn = conn
