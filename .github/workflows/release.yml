@@ -30,7 +30,34 @@ jobs:
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --skip=publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+
+      # Upload and publish with gh instead of letting goreleaser do it:
+      # GitHub occasionally returns transient 5xx on asset upload and goreleaser
+      # then aborts, leaving the release as a draft (which the registry never
+      # ingests). `gh release upload --clobber` is idempotent, and publishing
+      # after all assets are in place makes the registry see a complete release.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          manifest="dist/terraform-provider-truenas-installer_${version}_manifest.json"
+          cp terraform-registry-manifest.json "$manifest"
+
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --notes ""
+
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/*.zip \
+            dist/*_SHA256SUMS \
+            dist/*_SHA256SUMS.sig \
+            "$manifest" \
+            --clobber
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          printf '{"draft":false}' | \
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --input - >/dev/null
