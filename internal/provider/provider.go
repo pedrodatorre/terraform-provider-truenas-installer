@@ -63,7 +63,13 @@ func (p *truenasInstallerProvider) Schema(_ context.Context, _ provider.SchemaRe
 				Optional: true,
 				MarkdownDescription: "How long to wait for the installer to boot before failing, as a Go " +
 					"duration (for example `10m`). Defaults to `10m`. The same window is used to retry " +
-					"the TrueNAS API probe when the machine is already installed.",
+					"the TrueNAS API probe and to wait for the installed system after a reboot.",
+			},
+			"wait_for_reboot": schema.BoolAttribute{
+				Optional: true,
+				MarkdownDescription: "After `reboot_on_complete`, wait for the installed TrueNAS API to " +
+					"answer before returning. Defaults to `true`, so the module only finishes when " +
+					"TrueNAS is actually up.",
 			},
 		},
 	}
@@ -112,6 +118,11 @@ func (p *truenasInstallerProvider) Configure(ctx context.Context, req provider.C
 		}
 		p.config.BootTimeout = bootTimeout
 	}
+
+	p.config.WaitForReboot = true
+	if !configModel.WaitForReboot.IsNull() && !configModel.WaitForReboot.IsUnknown() {
+		p.config.WaitForReboot = configModel.WaitForReboot.ValueBool()
+	}
 }
 
 func (p *truenasInstallerProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -130,4 +141,5 @@ type providerModel struct {
 	Timeout            types.String `tfsdk:"timeout"`
 	InsecureSkipVerify types.Bool   `tfsdk:"insecure_skip_verify"`
 	BootTimeout        types.String `tfsdk:"boot_timeout"`
+	WaitForReboot      types.Bool   `tfsdk:"wait_for_reboot"`
 }

@@ -12,5 +12,6 @@ type Config struct {
 	Endpoint           string
 	Timeout            time.Duration
 	BootTimeout        time.Duration
+	WaitForReboot      bool
 	InsecureSkipVerify bool
 }

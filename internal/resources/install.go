@@ -265,10 +265,38 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 		}
 	}
 
+	version := info.Version
+	if plan.RebootOnComplete.ValueBool() && r.config.WaitForReboot {
+		boot := r.config.BootTimeout
+		if boot <= 0 {
+			boot = 10 * time.Minute
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, boot)
+		defer cancel()
+
+		installedVersion, err := client.ProbeInstalledWithRetry(
+			waitCtx,
+			cl.Host(),
+			request.Authentication.Username,
+			request.Authentication.Password,
+			r.config.InsecureSkipVerify,
+			5*time.Second,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"TrueNAS did not come back after the install",
+				"The installer finished and rebooted the VM, but the TrueNAS API did not answer. "+
+					"If the system is still booting, raise `boot_timeout`. Otherwise check the VM console.\n\n"+err.Error(),
+			)
+			return
+		}
+		version = installedVersion
+	}
+
 	plan.ID = types.StringValue(fmt.Sprintf("%s#%s", r.config.Endpoint, strings.Join(request.Disks, ",")))
 	plan.InstallationCompleted = types.BoolValue(true)
 	plan.InstallationError = types.StringNull()
-	plan.Version = types.StringValue(info.Version)
+	plan.Version = types.StringValue(version)
 	plan.EFI = types.BoolValue(info.EFI)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
