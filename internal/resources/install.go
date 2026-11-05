@@ -5,6 +5,7 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -187,6 +188,11 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 	connectCtx, cancel := context.WithTimeout(ctx, r.config.Timeout)
 	defer cancel()
 	if err := cl.ConnectWithRetry(connectCtx, 5*time.Second); err != nil {
+		var alreadyInstalled *client.AlreadyInstalledError
+		if errors.As(err, &alreadyInstalled) {
+			r.adoptInstalled(ctx, cl, &plan, request, resp)
+			return
+		}
 		resp.Diagnostics.AddError(
 			"Cannot reach the TrueNAS installer",
 			"The installer's JSON-RPC server was not reachable at "+r.config.Endpoint+". "+
@@ -264,6 +270,44 @@ func (r *installResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.Version = types.StringValue(info.Version)
 	plan.EFI = types.BoolValue(info.EFI)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// adoptInstalled handles the case where the installer is gone but the machine
+// answers on 443: probe the TrueNAS API with the admin credentials and, if it
+// authenticates, mark the resource complete instead of failing.
+func (r *installResource) adoptInstalled(ctx context.Context, cl *client.Client, plan *installModel, request client.InstallRequest, resp *resource.CreateResponse) {
+	probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	version, err := client.ProbeInstalled(
+		probeCtx,
+		cl.Host(),
+		request.Authentication.Username,
+		request.Authentication.Password,
+		r.config.InsecureSkipVerify,
+		30*time.Second,
+	)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"The installer is not running and the TrueNAS API did not confirm the installation",
+			"Port 443 answers at "+cl.Host()+", but authenticating to the TrueNAS API failed: "+err.Error()+
+				"\n\nIf you meant to rebuild, boot the installation ISO and wipe the boot disk before replacing this resource.",
+		)
+		return
+	}
+
+	resp.Diagnostics.AddWarning(
+		"TrueNAS is already installed",
+		"The installer is not running; the TrueNAS API answered at "+cl.Host()+" (version "+version+
+			"). Marking the resource complete without reinstalling.",
+	)
+
+	plan.ID = types.StringValue(fmt.Sprintf("%s#%s", r.config.Endpoint, strings.Join(request.Disks, ",")))
+	plan.InstallationCompleted = types.BoolValue(true)
+	plan.InstallationError = types.StringNull()
+	plan.Version = types.StringValue(version)
+	plan.EFI = types.BoolNull()
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *installResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

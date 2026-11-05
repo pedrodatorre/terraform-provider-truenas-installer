@@ -53,6 +53,12 @@ func (p *truenasInstallerProvider) Schema(_ context.Context, _ provider.SchemaRe
 				MarkdownDescription: "Per-call timeout as a Go duration (for example `45m`). " +
 					"Defaults to `30m`, which is generous enough for a full install.",
 			},
+			"insecure_skip_verify": schema.BoolAttribute{
+				Optional: true,
+				MarkdownDescription: "Skip TLS verification when probing the installed TrueNAS API " +
+					"(`wss://<host>/api/current`). Defaults to `true` because TrueNAS uses a " +
+					"self-signed certificate by default.",
+			},
 		},
 	}
 }
@@ -85,6 +91,11 @@ func (p *truenasInstallerProvider) Configure(ctx context.Context, req provider.C
 		}
 		p.config.Timeout = timeout
 	}
+
+	p.config.InsecureSkipVerify = true
+	if !configModel.InsecureSkipVerify.IsNull() && !configModel.InsecureSkipVerify.IsUnknown() {
+		p.config.InsecureSkipVerify = configModel.InsecureSkipVerify.ValueBool()
+	}
 }
 
 func (p *truenasInstallerProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -99,6 +110,7 @@ func (p *truenasInstallerProvider) DataSources(_ context.Context) []func() datas
 }
 
 type providerModel struct {
-	Endpoint types.String `tfsdk:"endpoint"`
-	Timeout  types.String `tfsdk:"timeout"`
+	Endpoint           types.String `tfsdk:"endpoint"`
+	Timeout            types.String `tfsdk:"timeout"`
+	InsecureSkipVerify types.Bool   `tfsdk:"insecure_skip_verify"`
 }

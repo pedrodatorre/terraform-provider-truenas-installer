@@ -9,6 +9,7 @@ import "time"
 // Config is populated by the provider's Configure method and read by resources
 // at request time.
 type Config struct {
-	Endpoint string
-	Timeout  time.Duration
+	Endpoint           string
+	Timeout            time.Duration
+	InsecureSkipVerify bool
 }

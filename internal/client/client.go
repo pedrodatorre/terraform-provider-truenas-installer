@@ -7,6 +7,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,8 +39,9 @@ type ProgressFunc func(progress float64, message string)
 
 // Client is a single JSON-RPC connection to the installer.
 type Client struct {
-	endpoint string
-	timeout  time.Duration
+	endpoint  string
+	timeout   time.Duration
+	tlsConfig *tls.Config
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -61,6 +63,28 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 
 // Endpoint returns the normalised WebSocket URL.
 func (c *Client) Endpoint() string { return c.endpoint }
+
+// Host returns the hostname of the normalised endpoint.
+func (c *Client) Host() string {
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// NewTLS builds a client that can connect to wss endpoints (the installed
+// TrueNAS middleware API). The installer itself is plain ws.
+func NewTLS(endpoint string, timeout time.Duration, insecureSkipVerify bool) (*Client, error) {
+	c, err := New(endpoint, timeout)
+	if err != nil {
+		return nil, err
+	}
+	// The TrueNAS web UI uses a self-signed certificate by default; this probe
+	// only runs during bootstrap.
+	c.tlsConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify} //nolint:gosec
+	return c, nil
+}
 
 func normalizeEndpoint(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -125,6 +149,16 @@ func (e *PermanentError) Error() string {
 
 func (e *PermanentError) Unwrap() error { return e.Err }
 
+// AlreadyInstalledError means the installer endpoint is gone but the machine
+// answers on 443, which is the installed TrueNAS.
+type AlreadyInstalledError struct {
+	Endpoint string
+}
+
+func (e *AlreadyInstalledError) Error() string {
+	return fmt.Sprintf("%s: the installer is not running but the machine answers on port 443; it appears to be running TrueNAS", e.Endpoint)
+}
+
 // bootTimeout caps how long ConnectWithRetry waits for the installer to boot.
 // The installer is normally reachable within a couple of minutes; waiting the
 // full RPC timeout (45m) only hides "the machine is already installed".
@@ -164,12 +198,7 @@ func (c *Client) ConnectWithRetry(ctx context.Context, interval time.Duration) e
 		// Port 80 refused: either the VM is still booting or it is already
 		// running the installed TrueNAS (which answers on 443).
 		if c.probeInstalled() {
-			return &PermanentError{
-				Endpoint: c.endpoint,
-				Reason: "port 443 is answering but the installer WebSocket is not; " +
-					"the machine appears to be running TrueNAS. Boot the installation ISO and wipe the boot disk before replacing this resource",
-				Err: lastErr,
-			}
+			return &AlreadyInstalledError{Endpoint: c.endpoint}
 		}
 
 		if time.Now().After(deadline) {
@@ -197,11 +226,60 @@ func (c *Client) probeInstalled() bool {
 	return true
 }
 
+// truenasAPIPort is the port of the installed TrueNAS middleware API. It is a
+// variable so tests can point it at a local TLS listener.
+var truenasAPIPort = "443"
+
+// Login authenticates against the TrueNAS middleware API.
+func (c *Client) Login(ctx context.Context, username, password string) error {
+	raw, err := c.Call(ctx, "auth.login", []any{username, password}, nil)
+	if err != nil {
+		return fmt.Errorf("auth.login: %w", err)
+	}
+	var ok bool
+	if err := json.Unmarshal(raw, &ok); err != nil {
+		return fmt.Errorf("parse auth.login response: %w", err)
+	}
+	if !ok {
+		return errors.New("authentication rejected: invalid username or password")
+	}
+	return nil
+}
+
+// ProbeInstalled verifies that TrueNAS is already installed at host and returns
+// its version by authenticating to the middleware API.
+func ProbeInstalled(ctx context.Context, host, username, password string, insecureSkipVerify bool, timeout time.Duration) (string, error) {
+	endpoint := "wss://" + net.JoinHostPort(host, truenasAPIPort) + "/api/current"
+	c, err := NewTLS(endpoint, timeout, insecureSkipVerify)
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+
+	if err := c.ConnectWithRetry(ctx, 2*time.Second); err != nil {
+		return "", err
+	}
+	if err := c.Login(ctx, username, password); err != nil {
+		return "", err
+	}
+	raw, err := c.Call(ctx, "system.info", nil, nil)
+	if err != nil {
+		return "", fmt.Errorf("system.info: %w", err)
+	}
+	var info struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return "", fmt.Errorf("parse system.info: %w", err)
+	}
+	return info.Version, nil
+}
+
 func (c *Client) connectLocked(ctx context.Context) error {
 	if c.conn != nil {
 		return nil
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, TLSClientConfig: c.tlsConfig}
 	conn, resp, err := dialer.DialContext(ctx, c.endpoint, nil)
 	if err != nil {
 		if resp != nil {

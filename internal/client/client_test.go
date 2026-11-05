@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -191,14 +192,74 @@ func TestConnectWithRetryDetectsInstalled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	var permanent *PermanentError
-	if !errors.As(err, &permanent) {
-		t.Fatalf("expected PermanentError, got %T: %v", err, err)
+	var alreadyInstalled *AlreadyInstalledError
+	if !errors.As(err, &alreadyInstalled) {
+		t.Fatalf("expected AlreadyInstalledError, got %T: %v", err, err)
 	}
 	if !strings.Contains(err.Error(), "running TrueNAS") {
 		t.Fatalf("unexpected message: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("took %s, expected a fail-fast error", elapsed)
+	}
+}
+
+func TestProbeInstalled(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/current" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			var request struct {
+				ID     *int64 `json:"id"`
+				Method string `json:"method"`
+			}
+			if err := conn.ReadJSON(&request); err != nil {
+				return
+			}
+
+			var result any
+			switch request.Method {
+			case "auth.login":
+				result = true
+			case "system.info":
+				result = map[string]any{"version": "25.10.5"}
+				_ = conn.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+				return
+			default:
+				_ = conn.WriteJSON(map[string]any{
+					"jsonrpc": "2.0", "id": request.ID,
+					"error": map[string]any{"code": -32601, "message": "method not found"},
+				})
+				continue
+			}
+			_ = conn.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+		}
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldPort := truenasAPIPort
+	truenasAPIPort = u.Port()
+	defer func() { truenasAPIPort = oldPort }()
+
+	version, err := ProbeInstalled(context.Background(), u.Hostname(), "truenas_admin", "secret123", true, 5*time.Second)
+	if err != nil {
+		t.Fatalf("ProbeInstalled: %v", err)
+	}
+	if version != "25.10.5" {
+		t.Fatalf("version = %q, want 25.10.5", version)
 	}
 }
