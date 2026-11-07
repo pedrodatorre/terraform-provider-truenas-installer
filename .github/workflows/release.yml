@@ -58,6 +58,10 @@ jobs:
             "$manifest" \
             --clobber
 
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          release_id="$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)"
+          if [ -z "$release_id" ]; then
+            echo "release ${GITHUB_REF_NAME} not found" >&2
+            exit 1
+          fi
           printf '{"draft":false}' | \
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --input - >/dev/null
